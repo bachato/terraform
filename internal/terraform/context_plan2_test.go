@@ -1754,11 +1754,6 @@ Note that adding these options may include further additional resource instances
 		})
 		diags.Sort()
 
-		// We're semi-abusing "ForRPC" here just to get diagnostics that are
-		// more easily comparable than the various different diagnostics types
-		// tfdiags uses internally. The RPC-friendly diagnostics are also
-		// comparison-friendly, by discarding all of the dynamic type information.
-		gotDiags := diags.ForRPC()
 		wantDiags := tfdiags.Diagnostics{
 			// Still get the warning about the -target option...
 			tfdiags.Sourceless(
@@ -1769,11 +1764,9 @@ Note that adding these options may include further additional resource instances
 The -target option is not for routine use, and is provided only for exceptional situations such as recovering from errors or mistakes, or when Terraform specifically suggests to use it as part of an error message.`,
 			),
 			// ...but now we have no error about test_object.a
-		}.ForRPC()
-
-		if diff := cmp.Diff(wantDiags, gotDiags); diff != "" {
-			t.Errorf("wrong diagnostics\n%s", diff)
 		}
+
+		tfdiags.AssertDiagnosticsMatch(t, wantDiags, diags)
 	})
 }
 
@@ -5603,7 +5596,7 @@ func TestContext2Plan_ephemeralInResource(t *testing.T) {
 	wantDiags = wantDiags.Append(&hcl.Diagnostic{
 		Severity: hcl.DiagError,
 		Summary:  "Invalid use of ephemeral value",
-		Detail:   "Ephemeral values are not valid in resource arguments, because resource instances must persist between Terraform phases.",
+		Detail:   `Ephemeral values are not valid for "in", because it is not a write-only attribute and must be persisted to state.`,
 		Subject: &hcl.Range{
 			Filename: filepath.Join(m.Module.SourceDir, "main.tf"),
 			Start: hcl.Pos{
@@ -5617,7 +5610,7 @@ func TestContext2Plan_ephemeralInResource(t *testing.T) {
 	wantDiags = wantDiags.Append(&hcl.Diagnostic{
 		Severity: hcl.DiagError,
 		Summary:  "Invalid use of ephemeral value",
-		Detail:   "Ephemeral values are not valid in resource arguments, because resource instances must persist between Terraform phases.",
+		Detail:   `Ephemeral values are not valid for "in", because it is not a write-only attribute and must be persisted to state.`,
 		Subject: &hcl.Range{
 			Filename: filepath.Join(m.Module.SourceDir, "main.tf"),
 			Start: hcl.Pos{
@@ -6313,5 +6306,49 @@ resource "aws_instance" "foo" {
 
 	if got, want := diags.Err().Error(), "Invalid resource state upgrade"; !strings.Contains(got, want) {
 		t.Errorf("unexpected error message\ngot: %s\nwant substring: %s", got, want)
+	}
+}
+
+func TestContext2Plan_orphanUpdateInstance(t *testing.T) {
+	// ean orphaned instance should still reflect the refreshed state in the plan
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+  for_each = {}
+}
+`,
+	})
+
+	p := simpleMockProvider()
+	p.ReadResourceFn = func(req providers.ReadResourceRequest) (resp providers.ReadResourceResponse) {
+		state := req.PriorState.AsValueMap()
+		state["test_string"] = cty.StringVal("new")
+		resp.NewState = cty.ObjectVal(state)
+		return resp
+	}
+
+	state := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(mustResourceInstanceAddr(`test_object.a["old"]`), &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{"test_string":"old"}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`))
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	plan, diags := ctx.Plan(m, state, DefaultPlanOpts)
+	assertNoErrors(t, diags)
+
+	resourceType := p.GetProviderSchemaResponse.ResourceTypes["test_object"].Block.ImpliedType()
+	change, err := plan.Changes.ResourceInstance(mustResourceInstanceAddr(`test_object.a["old"]`)).Decode(resourceType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.Before.GetAttr("test_string").AsString() != "new" {
+		t.Fatalf("resource before value not refreshed in plan: %#v\n", change.Before)
 	}
 }

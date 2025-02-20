@@ -474,3 +474,71 @@ func TestDiagnosticsNonFatalErr(t *testing.T) {
 		}
 	})
 }
+
+func TestWarnings(t *testing.T) {
+	errorDiag := &hcl.Diagnostic{
+		Severity: hcl.DiagError,
+		Summary:  "something bad happened",
+		Detail:   "details of the error",
+	}
+
+	warnDiag := &hcl.Diagnostic{
+		Severity: hcl.DiagWarning,
+		Summary:  "something bad happened",
+		Detail:   "details of the warning",
+	}
+
+	cases := map[string]struct {
+		diags    Diagnostics
+		expected Diagnostics
+	}{
+		"empty diags": {
+			diags:    Diagnostics{},
+			expected: Diagnostics{},
+		},
+		"nil diags": {
+			diags:    nil,
+			expected: Diagnostics{},
+		},
+		"all error diags": {
+			diags: func() Diagnostics {
+				var d Diagnostics
+				d = d.Append(errorDiag, errorDiag, errorDiag)
+				return d
+			}(),
+			expected: Diagnostics{},
+		},
+		"mixture of error and warning diags": {
+			diags: func() Diagnostics {
+				var d Diagnostics
+				d = d.Append(errorDiag, errorDiag, warnDiag)
+				return d
+			}(),
+			expected: func() Diagnostics {
+				var d Diagnostics
+				d = d.Append(warnDiag)
+				return d
+			}(),
+		},
+		"empty error diags": {
+			diags: func() Diagnostics {
+				var d Diagnostics
+				d = d.Append(warnDiag, warnDiag)
+				return d
+			}(),
+			expected: func() Diagnostics {
+				var d Diagnostics
+				d = d.Append(warnDiag, warnDiag)
+				return d
+			}(),
+		},
+	}
+
+	for tn, tc := range cases {
+		t.Run(tn, func(t *testing.T) {
+			warnings := tc.diags.Warnings()
+
+			AssertDiagnosticsMatch(t, tc.expected, warnings)
+		})
+	}
+}
